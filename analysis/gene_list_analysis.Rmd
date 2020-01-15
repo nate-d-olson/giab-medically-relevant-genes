@@ -1,0 +1,454 @@
+---
+title: "Medically Relevant Gene List Analysis"
+author: "Nate Olson"
+date: '`r Sys.Date()`'  
+output:  
+  bookdown::html_document2:
+    code_folding: hide  
+    theme: yeti  
+    toc: yes  
+    toc_float: yes  
+---  
+
+```{r include = FALSE}
+library(tidyverse)
+library(readxl)
+library(here)
+```
+
+# Objective 
+Summarize and characterize medically relevant gene list to aid description of the list in manuscript and for characterization plan development. 
+
+
+## Hypotheses about different classes of regions not covered by v4.1
+
+1. Small regions excluded due to long homopolymers
+1. Small regions excluded due to complex variants
+1. Large regions excluded due to putative SV
+    1. Real SV
+    1. False SV due to seg dup or other repeat structure
+1. Large difficult to map regions/seg dups
+1. Long tandem repeats
+1. True duplications (CNVs) in HG002
+1. Incorrectly identified duplications (CNVs) in HG002 (e.g., due to slightly higher than normal coverage)
+1. Errors in GRCh37
+
+# Approach
+- exploratory data analysis
+- annotated input gene list generate by JW and JC
+
+
+
+### Chr1-22 histograms faceted by % coverage bins in v4.1  
+
+1. Fraction of regions not covered by v4.1 covered by each difficult bed file
+1. Mean coverage by 10x, ONT, and CCS
+1. Fraction covered at >20x by 10x, ONT, and CCS
+1. # of assembled contigs
+1. Fraction covered by haplotype 1 contig
+
+
+Coverage Bins: 0, 0.0000001-50, 50-60, 60-70, 70-80, 80-90, 90-95, 95-99, 99-99.999999
+
+# Approach
+
+# Analysis
+## Load Gene List Data
+```{r message = FALSE, warning = FALSE}
+gene_list_file <- "GRCh37_characterizations_assembly_contig_coverages_merged.xlsx"
+gene_list_df <- read_xlsx(here("data", gene_list_file), 
+                          .name_repair = "universal")
+```
+
+```{r}
+glimpse(gene_list_df)
+```
+
+## Tidying Data 
+__helper functions__
+```{r}
+tidy_pct_bases <- function(df){
+  df %>% 
+    gather(key = "region", value = "value", -Gene.Symbol) %>% 
+    filter(!is.na(value)) %>% 
+    mutate(metric = if_else(str_detect(region, "Bases.overlap"), 
+                            "bases", "percent")) %>% 
+    mutate(region = str_remove(region, "Bases.overlap.with."),
+           region = str_remove(region, "Percent.of.gene.overlap.with."),
+           region = str_remove(region, "Percent.of.gene.overlap.")) %>% 
+    spread(metric, value)
+}
+```
+
+
+
+__Gene Coordinates__
+```{r}
+gene_coord_df <- gene_list_df %>% 
+  select(Chromosome, Start.minus.20kbp, End.plus.20kbp, Gene.Symbol)
+```
+
+```{r}
+glimpse(gene_coord_df)
+```
+
+__Benchmarkset Overlap__
+```{r}
+benchmark_overlap <- gene_list_df %>% 
+  select(Gene.Symbol, contains("v4.1"), contains("SV.0.6"), -contains("CNV")) %>% 
+  tidy_pct_bases() %>% 
+  mutate(region = str_remove(region, "GIAB.expanded.by..150.Tier1andTier2.")) %>% 
+  rename(benchmark_set = region)
+```
+
+```{r}
+glimpse(benchmark_overlap)
+```
+
+__Data set coverage__
+```{r}
+gene_cov_df <- gene_list_df %>% 
+  select(Gene.Symbol, contains("cover")) %>% 
+  gather(key = "analysis", value = "value", -Gene.Symbol) %>% 
+    filter(!is.na(value)) %>% 
+  mutate(data_set = case_when(str_detect(analysis, "CCS") ~ "CCS",
+                              str_detect(analysis, "10X") ~ "10X",
+                              str_detect(analysis, "ONT") ~ "ONT"),
+         cov_stat = if_else(str_detect(analysis, "average"), 
+                            "avg_cov",
+                            str_extract(analysis, "(?<=covered.by.).*(?=.CCS|.ONT|.10X)"))) %>% 
+  mutate(cov_stat = str_replace(cov_stat, "at.least.", "bp_cov_by_")) %>% 
+  select(-analysis) %>% 
+    spread(cov_stat, value)
+```
+
+```{r}
+glimpse(gene_cov_df)
+```
+
+__Difficult region overlap__
+```{r}
+difficult_regions_df <- gene_list_df %>% 
+  select(Gene.Symbol, contains("overlap"), 
+         -contains("v4.1"), -contains("SV.0.6"), contains("CNV")) %>% 
+  tidy_pct_bases()
+
+```
+
+```{r}
+glimpse(difficult_regions_df)
+```
+
+difficult regions
+```{r}
+unique(difficult_regions_df$region)
+```
+
+
+__Assembly Coverage__
+```{r}
+asm_coverage_df <- gene_list_df %>% 
+  select(Gene.Symbol, H1.Length.Ratio, H2.Length.Ratio, Number.of.Hits)
+```
+
+```{r}
+glimpse(asm_coverage_df)
+```
+
+
+## Figures
+
+__Chr1-22 histograms faceted by % coverage bins in v4.1__
+```{r}
+gene_coord_v4_df <- benchmark_overlap %>% 
+  filter(benchmark_set == "v4.1.draft") %>% 
+    mutate(overlap_bins = cut(percent, 
+                            c(0,0.0000001, 0.50, 0.60, 0.70, 0.80, 
+                              0.90, 0.95, 0.99, 1.00),
+                            include.lowest = TRUE),
+           overlap_pct = percent,
+           overlap_bp  = bases) %>% 
+  select(Gene.Symbol, overlap_bp, overlap_pct, overlap_bins) %>% 
+  left_join(gene_coord_df) %>% 
+  mutate(gene_size = End.plus.20kbp - Start.minus.20kbp,
+         uncharacterized_bp = gene_size - overlap_bp) %>% 
+  filter(Chromosome %in% c(1:22))
+```
+
+```{r}
+gene_coord_v4_df
+```
+
+Breakdown of V4.1 overlap
+```{r}
+ggplot(gene_coord_v4_df) +
+  geom_histogram(aes(x = 100*overlap_pct)) +
+  theme_bw() + 
+  labs(x = "% Overlap with V4.1 Small Variant Benchmark Regions",
+       y = "Number of Genes")
+```
+
+```{r}
+ggplot(gene_coord_v4_df) +
+  geom_histogram(aes(x = overlap_bp)) +
+  theme_bw() + 
+  labs(x = "bp Overlap with V4.1 Small Variant Benchmark Regions",
+       y = "Number of Genes")
+```
+
+
+```{r}
+ggplot(gene_coord_v4_df) +
+  geom_point(aes(x = overlap_bp, y = overlap_pct)) +
+  scale_x_log10() + 
+  theme_bw() + 
+  labs(x = "base pair", y = "percent")
+```
+
+```{r}
+ggplot(gene_coord_v4_df) +
+  geom_histogram(aes(x = uncharacterized_bp)) +
+  theme_bw() + 
+  scale_x_log10() + 
+  labs(x = "bp Not in V4.1 Small Variant Benchmark Regions",
+       y = "Number of Genes")
+```
+
+
+### Coverage Bins
+```{r}
+gene_coord_v4_df %>%
+group_by(overlap_bins) %>%
+summarise(count = n())
+```
+
+### Uncharacterized Regions
+```{r}
+comp_bed_file <- paste0("HG002_GRCh37_1_22_v4.1_draft_benchmark_complement_",
+                        "intersect_GRCh37_Mandelker_COSMIC_ENSEMBLE_IDs_",
+                        "and_geneName_primary_assembly_only_slop20000.bed")
+overlap_compliment <- read_tsv(here("data",comp_bed_file), 
+                               col_names = c("Chromosome", "start","end", 
+                                             "Gene.Symbol","ensamble_id")) %>% 
+  mutate(region_size = end - start)
+
+```
+
+
+Region Size Distribution
+```{r}
+ggplot(overlap_compliment) + 
+  geom_histogram(aes(x = region_size)) +
+  geom_vline(aes(xintercept = 100), color = "darkorange") + 
+  scale_x_log10() + 
+  theme_bw()
+```
+
+Total bases excluded by region size bins
+```{r}
+overlap_compliment %>% 
+  mutate(region_size_bins = cut(region_size, c(0, 10, 100, 1000, 10000, 
+                                               100000, 1000000, 10000000),
+                                include.lowest = FALSE)) %>% 
+  group_by(region_size_bins) %>% 
+  summarise(
+    n_regions = n(),
+    total_bp = sum(region_size))
+```
+```{r}
+overlap_compliment %>% 
+  group_by(region_size) %>% 
+  summarise(n_regions = n()) %>% 
+  ungroup() %>% 
+  top_n(10, n_regions) %>% 
+  arrange(-n_regions)
+```
+
+Number of excluded regions by gene
+```{r}
+overlap_compliment %>% 
+  group_by(Gene.Symbol) %>% 
+  summarise(count = n()) %>% 
+  ggplot() + geom_histogram(aes(x = count)) + theme_bw() + 
+  labs(x = "Number of Uncharacterized Regions")
+```
+
+```{r}
+overlap_compliment %>% 
+  group_by(Gene.Symbol) %>% 
+  summarise(number_of_regions = n()) %>% 
+  group_by(number_of_regions) %>% 
+  summarise(number_of_genes = n()) %>% 
+  arrange(-number_of_genes)
+```
+
+
+### Difficult Regions Coverage
+
+Callset used in small variant benchmarking pipeline to define filtered regions by dataset.
+
+```{r}
+callset_tbl <- read_tsv(here("data","callsettable_22_v4_1.txt"))
+```
+```{r}
+callset_tbl %>% 
+  select(-`#Platform`, -Dataset, -annotationsFile, -vcfAll, -callableBed) %>% 
+  gather("region", "exclude", -Callset) %>% 
+  group_by(region) %>% 
+  summarise(total_exclude = sum(exclude)) %>% 
+  arrange(-total_exclude)
+```
+```{r}
+unique(difficult_regions_df$region)
+```
+
+```{r}
+difficult_regions_df <- difficult_regions_df %>% 
+  mutate(exclusion = if_else(region %in% c("AllRepeats.gt.10kb", 
+                                           "intersect.Illumina..CCS..ONT.CNV.v4.1a", 
+                                           "segdups.with.count.gt.5.and.percent.identity.gte.990",
+                                           "union.CCS.and.ONT.outlier.CNV.v4.1a.draft", 
+                                           "SP_Sponly",
+                                           "vdj"), 
+                             "all", "others"))
+```
+
+
+
+1. Fraction of regions not covered by v4.1 covered by each difficult bed file - information not included in current table
+
+```{r}
+inner_join(difficult_regions_df, gene_coord_v4_df) %>% 
+  filter(exclusion == "all",
+         percent != 0) %>% 
+  mutate(combined_overlap = percent + overlap_pct) %>% 
+  ggplot() + 
+  geom_point(aes(x = overlap_pct, y = percent, color = region)) + 
+  facet_wrap(~overlap_bins, scales = "free") + 
+  theme_bw()
+```
+
+Distribution in percent of gene covered by V4.1 and one of the difficult region bed files excluded for all integration input callsets. 
+Can potentially develop independent strategines for genes with uncharacterized regions excluded due to overlap with one different region bed. 
+
+```{r fig.height = 6}
+inner_join(difficult_regions_df, gene_coord_v4_df) %>% 
+  filter(exclusion == "all",
+         percent != 0) %>% 
+  mutate(combined_overlap = percent + overlap_pct) %>% 
+  group_by(Gene.Symbol) %>% 
+  top_n(1, combined_overlap) %>% 
+  ggplot() + geom_histogram(aes(x = combined_overlap, fill = overlap_bins)) + 
+  facet_wrap(~region, scales = "free_y", ncol = 1) + 
+  theme_bw()
+```
+
+Genes completely excluded by a single difficult region.
+```{r}
+inner_join(difficult_regions_df, gene_coord_v4_df) %>% 
+  filter(exclusion == "all",
+         percent != 0) %>% 
+  mutate(combined_overlap = percent + overlap_pct) %>% 
+  filter(combined_overlap == 1) %>% 
+  select(Gene.Symbol, region, Chromosome)
+```
+
+
+```{r}
+inner_join(difficult_regions_df, gene_coord_v4_df) %>% 
+  filter(exclusion == "all",
+         percent != 0) %>% 
+  mutate(combined_overlap = percent + overlap_pct) %>% 
+  filter(combined_overlap != 1) %>% 
+  arrange(-combined_overlap, Gene.Symbol) %>% 
+  select(Gene.Symbol, region, combined_overlap, overlap_pct, percent)
+```
+
+!!!TODO!!!
+```{r}
+left_join(difficult_regions_df, gene_coord_v4_df) %>% 
+  filter(overlap_bins == "(0.5,0.6]") %>% 
+  ggplot() + geom_bar(aes(x = Gene.Symbol, y = percent, fill = region), 
+                      stat = "identity") + 
+  coord_flip() + 
+  theme_bw()
+```
+
+```{r}
+
+```
+
+
+
+### Mean coverage by 10x, ONT, and CCS
+```{r fig.height = 6}
+left_join(gene_coord_v4_df, gene_cov_df) %>%
+  ggplot() +
+    geom_histogram(aes(x = avg_cov)) +
+    facet_grid(overlap_bins~data_set, scales = "free") + 
+  theme_bw()
+```
+
+### Fraction covered at >20x by 10x, ONT, and CCS
+
+```{r fig.height = 6}
+left_join(gene_coord_v4_df, gene_cov_df) %>%
+  ggplot() +
+    geom_histogram(aes(x = bp_cov_by_20X/(End.plus.20kbp - Start.minus.20kbp))) +
+    facet_grid(overlap_bins~data_set, scales = "free") + 
+  theme_bw() + 
+  labs(x = "Fraction covered by > 20X", y = "Number of Genes")
+```
+
+
+### Assembly Coverage
+
+```{r}
+inner_join(gene_coord_v4_df, asm_coverage_df) %>% 
+  group_by(overlap_bins, Number.of.Hits) %>% 
+  summarise(count = n()) %>% 
+  spread(Number.of.Hits, count, fill = 0)
+```
+
+```{r}
+inner_join(gene_coord_v4_df, asm_coverage_df) %>% 
+  ggplot() + 
+  geom_histogram(aes(x = H1.Length.Ratio)) + 
+  facet_grid(overlap_bins~., scales = "free_y") + 
+  theme_bw()
+```
+
+
+### Fraction covered by haplotype 1 contig
+
+```{r}
+tidy_hap_coverage <- asm_coverage_df %>% 
+  select(Gene.Symbol, starts_with("H")) %>% 
+  gather(key = "hap", value = "length_ratio", -Gene.Symbol) %>% 
+  mutate(hap = str_remove(hap, ".Length.Ratio")) %>% 
+  filter(!is.na(length_ratio))
+
+```
+
+```{r}
+inner_join(gene_coord_v4_df, tidy_hap_coverage) %>% 
+  ggplot() + 
+  geom_histogram(aes(x = length_ratio)) + 
+  facet_grid(overlap_bins~hap, scales = "free") + 
+  theme_bw()
+```
+
+# System Information
+
+```{r}
+s_info <- devtools::session_info()
+print(s_info$platform)
+```
+
+## Loaded Packages
+```{r}
+as.data.frame(s_info$packages) %>% 
+  filter(attached) %>% 
+  select(package, loadedversion, date, source) %>% 
+  knitr::kable()
+```
